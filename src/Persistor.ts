@@ -1,0 +1,81 @@
+import type { CacheAdapter } from "./CacheAdapter.js";
+import type { StorageAdapter } from "./StorageAdapter.js";
+import type { PersistenceMapperFunction } from "./types.js";
+import { CacheCorruptionError } from "./errors.js";
+
+export interface PersistorOptions {
+  maxSize?: number | false;
+  persistenceMapper?: PersistenceMapperFunction;
+  debug?: boolean;
+}
+
+export class Persistor {
+  private paused = false;
+  private readonly cacheAdapter: CacheAdapter;
+  private readonly storageAdapter: StorageAdapter;
+  private readonly options: PersistorOptions;
+
+  constructor(
+    cacheAdapter: CacheAdapter,
+    storageAdapter: StorageAdapter,
+    options: PersistorOptions,
+  ) {
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- runtime guard for JS callers
+    if (!cacheAdapter) {
+      throw new Error("Persistor requires a cacheAdapter");
+    }
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- runtime guard for JS callers
+    if (!storageAdapter) {
+      throw new Error("Persistor requires a storageAdapter");
+    }
+    this.cacheAdapter = cacheAdapter;
+    this.storageAdapter = storageAdapter;
+    this.options = options;
+  }
+
+  public async persist(): Promise<void> {
+    if (this.paused) return;
+
+    let data = this.cacheAdapter.extract();
+
+    if (this.options.persistenceMapper) {
+      data = await this.options.persistenceMapper(data);
+    }
+
+    const maxSize = this.options.maxSize;
+    if (maxSize !== false && maxSize !== undefined && data.length > maxSize) {
+      await this.purge();
+      this.paused = true;
+      return;
+    }
+
+    await this.storageAdapter.write(data);
+  }
+
+  public async restore(): Promise<void> {
+    const data = await this.storageAdapter.read();
+    if (data !== null) {
+      try {
+        this.cacheAdapter.restore(data);
+      } catch (error) {
+        await this.purge();
+        throw new CacheCorruptionError(
+          "Failed to restore cache from storage",
+          { cause: error },
+        );
+      }
+    }
+  }
+
+  public async purge(): Promise<void> {
+    await this.storageAdapter.purge();
+  }
+
+  public get isPaused(): boolean {
+    return this.paused;
+  }
+
+  public set isPaused(value: boolean) {
+    this.paused = value;
+  }
+}
