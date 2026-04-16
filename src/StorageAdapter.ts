@@ -1,4 +1,5 @@
 import type { PersistentStorage } from "./types.js";
+import { StorageQuotaError } from "./errors.js";
 
 export class StorageAdapter {
   private readonly key: string;
@@ -24,7 +25,20 @@ export class StorageAdapter {
   }
 
   public async write(data: string): Promise<void> {
-    await this.storage.setItem(this.key, data);
+    try {
+      await this.storage.setItem(this.key, data);
+    } catch (error) {
+      if (
+        error instanceof DOMException &&
+        error.name === "QuotaExceededError"
+      ) {
+        throw new StorageQuotaError(
+          "Storage quota exceeded while persisting cache",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
   }
 
   public async purge(): Promise<void> {

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { CachePersistor } from "../CachePersistor.js";
-import { MockStorage } from "./helpers/MockStorage.js";
+import { MockStorage, FailingStorage } from "./helpers/MockStorage.js";
 import {
   createTestCache,
   createPopulatedCache,
@@ -156,5 +156,44 @@ describe("CachePersistor", () => {
 
     expect(storage.getItem("my-cache")).not.toBeNull();
     expect(storage.getItem("apollo-cache-persist")).toBeNull();
+  });
+
+  it("remove prevents direct persist calls", async () => {
+    const cache = createPopulatedCache();
+    const storage = new MockStorage();
+    const persistor = new CachePersistor({ cache, storage, trigger: false });
+
+    persistor.remove();
+    await persistor.persist();
+
+    expect(storage.getItem("apollo-cache-persist")).toBeNull();
+  });
+
+  it("resume after remove re-enables direct persist", async () => {
+    const cache = createPopulatedCache();
+    const storage = new MockStorage();
+    const persistor = new CachePersistor({ cache, storage, trigger: false });
+
+    persistor.remove();
+    persistor.resume();
+    await persistor.persist();
+
+    expect(storage.getItem("apollo-cache-persist")).not.toBeNull();
+  });
+
+  it("onError receives debounced persist errors", async () => {
+    const cache = createPopulatedCache();
+    const storage = new FailingStorage();
+    const onError = vi.fn();
+
+    const persistor = new CachePersistor({ cache, storage, onError });
+
+    cache.writeQuery({ query: SAMPLE_QUERY, data: SAMPLE_DATA });
+
+    await vi.advanceTimersByTimeAsync(1001);
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError.mock.calls[0][0]).toBeInstanceOf(Error);
+    persistor.remove();
   });
 });

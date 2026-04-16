@@ -73,7 +73,7 @@ describe("Persistor fuzz", () => {
             maxSize,
           });
 
-          await persistor.persist();
+          await persistor.persist().catch(() => {});
 
           expect(persistor.isPaused).toBe(true);
           expect(await storageAdapter.read()).toBeNull();

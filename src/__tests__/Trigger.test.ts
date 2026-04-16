@@ -184,4 +184,84 @@ describe("Trigger", () => {
     trigger.remove();
     expect(uninstallFn).toHaveBeenCalledOnce();
   });
+
+  it("onError is called when persist throws in debounced path", async () => {
+    const cache = createPopulatedCache();
+    const error = new Error("persist failed");
+    const failingPersistor = new Persistor(
+      new CacheAdapter(cache),
+      new StorageAdapter(new MockStorage()),
+      { persistenceMapper: async () => { throw error; } },
+    );
+
+    const onError = vi.fn();
+    const trigger = new Trigger(failingPersistor, cache, {
+      trigger: false,
+      onError,
+    });
+    trigger.fire();
+
+    await vi.advanceTimersByTimeAsync(1001);
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(error);
+  });
+
+  it("onError is called when persist throws with debounce 0", async () => {
+    const cache = createPopulatedCache();
+    const error = new Error("persist failed");
+    const failingPersistor = new Persistor(
+      new CacheAdapter(cache),
+      new StorageAdapter(new MockStorage()),
+      { persistenceMapper: async () => { throw error; } },
+    );
+
+    const onError = vi.fn();
+    const trigger = new Trigger(failingPersistor, cache, {
+      trigger: false,
+      debounce: 0,
+      onError,
+    });
+    trigger.fire();
+
+    // Allow microtask to flush
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(error);
+  });
+
+  it("onError exception does not propagate", async () => {
+    const cache = createPopulatedCache();
+    const failingPersistor = new Persistor(
+      new CacheAdapter(cache),
+      new StorageAdapter(new MockStorage()),
+      { persistenceMapper: async () => { throw new Error("persist failed"); } },
+    );
+
+    const onError = (): void => { throw new Error("onError itself threw"); };
+    const trigger = new Trigger(failingPersistor, cache, {
+      trigger: false,
+      onError,
+    });
+    trigger.fire();
+
+    // Should not throw
+    await vi.advanceTimersByTimeAsync(1001);
+  });
+
+  it("without onError, errors are still silently dropped", async () => {
+    const cache = createPopulatedCache();
+    const failingPersistor = new Persistor(
+      new CacheAdapter(cache),
+      new StorageAdapter(new MockStorage()),
+      { persistenceMapper: async () => { throw new Error("persist failed"); } },
+    );
+
+    const trigger = new Trigger(failingPersistor, cache, { trigger: false });
+    trigger.fire();
+
+    // Should not throw or cause unhandled rejection
+    await vi.advanceTimersByTimeAsync(1001);
+  });
 });

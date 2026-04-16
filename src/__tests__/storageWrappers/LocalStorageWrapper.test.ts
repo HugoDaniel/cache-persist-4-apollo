@@ -39,4 +39,21 @@ describe("LocalStorageWrapper", () => {
     wrapper.setItem("key", largeValue);
     expect(wrapper.getItem("key")).toBe(largeValue);
   });
+
+  it("throws if storage is not writable", () => {
+    const readOnlyStorage = {
+      length: 0,
+      key: () => null,
+      getItem: () => null,
+      setItem: () => {
+        throw new DOMException("not allowed", "SecurityError");
+      },
+      removeItem: () => {},
+      clear: () => {},
+    } as Storage;
+
+    expect(() => new LocalStorageWrapper(readOnlyStorage)).toThrow(
+      "not writable",
+    );
+  });
 });

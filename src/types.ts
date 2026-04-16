@@ -23,4 +23,6 @@ export interface CachePersistorOptions {
   maxSize?: number | false;
   persistenceMapper?: PersistenceMapperFunction;
   debug?: boolean;
+  onError?: (error: unknown) => void;
+  version?: string | number;
 }

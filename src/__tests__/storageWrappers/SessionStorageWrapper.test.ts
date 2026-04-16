@@ -33,4 +33,21 @@ describe("SessionStorageWrapper", () => {
     wrapper.setItem("key", "");
     expect(wrapper.getItem("key")).toBe("");
   });
+
+  it("throws if storage is not writable", () => {
+    const readOnlyStorage = {
+      length: 0,
+      key: () => null,
+      getItem: () => null,
+      setItem: () => {
+        throw new DOMException("not allowed", "SecurityError");
+      },
+      removeItem: () => {},
+      clear: () => {},
+    } as Storage;
+
+    expect(() => new SessionStorageWrapper(readOnlyStorage)).toThrow(
+      "not writable",
+    );
+  });
 });

@@ -38,10 +38,12 @@ export class CachePersistor {
       maxSize: options.maxSize,
       persistenceMapper: options.persistenceMapper,
       debug: options.debug,
+      version: options.version,
     });
     this.trigger = new Trigger(this.persistor, options.cache, {
       trigger: options.trigger,
       debounce: options.debounce,
+      onError: options.onError,
     });
   }
 
@@ -49,8 +51,13 @@ export class CachePersistor {
     return this.persistor.persist();
   }
 
-  public restore(): Promise<void> {
-    return this.persistor.restore();
+  public async restore(): Promise<void> {
+    this.trigger.pause();
+    try {
+      await this.persistor.restore();
+    } finally {
+      this.trigger.resume();
+    }
   }
 
   public purge(): Promise<void> {
@@ -69,6 +76,7 @@ export class CachePersistor {
 
   public remove(): void {
     this.trigger.remove();
+    this.persistor.isPaused = true;
   }
 
   public getSize(): Promise<number> {

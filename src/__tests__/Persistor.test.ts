@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Persistor } from "../Persistor.js";
 import { CacheAdapter } from "../CacheAdapter.js";
 import { StorageAdapter } from "../StorageAdapter.js";
-import { CacheCorruptionError } from "../errors.js";
+import { CacheCorruptionError, MaxSizeExceededError } from "../errors.js";
 import { MockStorage } from "./helpers/MockStorage.js";
 import { createPopulatedCache } from "./helpers/createTestCache.js";
 
@@ -45,10 +45,26 @@ describe("Persistor", () => {
       maxSize: 10, // Very small to trigger
     });
 
-    await persistor.persist();
+    await expect(persistor.persist()).rejects.toThrow(MaxSizeExceededError);
 
     expect(await storageAdapter.read()).toBeNull(); // purged
     expect(persistor.isPaused).toBe(true);
+  });
+
+  it("MaxSizeExceededError includes dataSize and maxSize", async () => {
+    const persistor = new Persistor(cacheAdapter, storageAdapter, {
+      maxSize: 10,
+    });
+
+    try {
+      await persistor.persist();
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MaxSizeExceededError);
+      const msError = error as MaxSizeExceededError;
+      expect(msError.maxSize).toBe(10);
+      expect(msError.dataSize).toBeGreaterThan(10);
+    }
   });
 
   it("persist writes normally when under maxSize", async () => {
@@ -161,5 +177,97 @@ describe("Persistor", () => {
     expect(persistor.isPaused).toBe(true);
     persistor.isPaused = false;
     expect(persistor.isPaused).toBe(false);
+  });
+
+  describe("version stamping", () => {
+    it("persisted data includes version envelope", async () => {
+      const persistor = new Persistor(cacheAdapter, storageAdapter, {
+        version: 1,
+      });
+
+      await persistor.persist();
+
+      const raw = await storageAdapter.read();
+      const envelope = JSON.parse(raw!);
+      expect(envelope).toHaveProperty("__version", 1);
+      expect(typeof envelope.data).toBe("string");
+    });
+
+    it("matching version restores successfully", async () => {
+      const persistor = new Persistor(cacheAdapter, storageAdapter, {
+        version: "v1",
+      });
+      await persistor.persist();
+
+      const freshCache = createPopulatedCache();
+      const freshCacheAdapter = new CacheAdapter(freshCache);
+      const restorePersistor = new Persistor(
+        freshCacheAdapter,
+        storageAdapter,
+        { version: "v1" },
+      );
+      await restorePersistor.restore();
+
+      expect(freshCacheAdapter.extract()).toBe(cacheAdapter.extract());
+    });
+
+    it("mismatched version purges and does not restore", async () => {
+      const persistor = new Persistor(cacheAdapter, storageAdapter, {
+        version: 1,
+      });
+      await persistor.persist();
+
+      const freshCache = createPopulatedCache();
+      const freshCacheAdapter = new CacheAdapter(freshCache);
+      const extractBefore = freshCacheAdapter.extract();
+      const restorePersistor = new Persistor(
+        freshCacheAdapter,
+        storageAdapter,
+        { version: 2 },
+      );
+      await restorePersistor.restore();
+
+      // Cache unchanged (nothing restored)
+      expect(freshCacheAdapter.extract()).toBe(extractBefore);
+      // Storage purged
+      expect(await storageAdapter.read()).toBeNull();
+    });
+
+    it("unversioned storage data purged when version is set", async () => {
+      // Write raw (no version) data
+      const persistor = new Persistor(cacheAdapter, storageAdapter, {});
+      await persistor.persist();
+      expect(await storageAdapter.read()).not.toBeNull();
+
+      // Restore with version set — old data should be purged
+      const freshCache = createPopulatedCache();
+      const freshCacheAdapter = new CacheAdapter(freshCache);
+      const extractBefore = freshCacheAdapter.extract();
+      const restorePersistor = new Persistor(
+        freshCacheAdapter,
+        storageAdapter,
+        { version: 1 },
+      );
+      await restorePersistor.restore();
+
+      expect(freshCacheAdapter.extract()).toBe(extractBefore);
+      expect(await storageAdapter.read()).toBeNull();
+    });
+
+    it("no version preserves existing behavior", async () => {
+      const persistor = new Persistor(cacheAdapter, storageAdapter, {});
+      await persistor.persist();
+
+      const freshCache = createPopulatedCache();
+      const freshCacheAdapter = new CacheAdapter(freshCache);
+      const restorePersistor = new Persistor(
+        freshCacheAdapter,
+        storageAdapter,
+        {},
+      );
+      await restorePersistor.restore();
+
+      expect(freshCacheAdapter.extract()).toBe(cacheAdapter.extract());
+    });
   });
 });

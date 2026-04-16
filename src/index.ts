@@ -1,6 +1,10 @@
 export { CachePersistor } from "./CachePersistor.js";
 export { persistCache } from "./persistCache.js";
-export { CacheCorruptionError } from "./errors.js";
+export {
+  CacheCorruptionError,
+  MaxSizeExceededError,
+  StorageQuotaError,
+} from "./errors.js";
 export type {
   CachePersistorOptions,
   PersistentStorage,

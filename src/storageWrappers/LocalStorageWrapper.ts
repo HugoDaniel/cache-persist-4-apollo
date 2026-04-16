@@ -11,6 +11,15 @@ export class LocalStorageWrapper implements PersistentStorage {
     if (typeof storage.getItem !== "function") {
       throw new Error("LocalStorageWrapper requires a valid Storage implementation");
     }
+    try {
+      const testKey = "__apollo_cache_persist_test__";
+      storage.setItem(testKey, "1");
+      storage.removeItem(testKey);
+    } catch {
+      throw new Error(
+        "LocalStorageWrapper: storage is not writable (private browsing, disabled, or sandboxed)",
+      );
+    }
     this.storage = storage;
   }
 

@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { StorageAdapter } from "../StorageAdapter.js";
-import { MockStorage, MockAsyncStorage } from "./helpers/MockStorage.js";
+import { StorageQuotaError } from "../errors.js";
+import {
+  MockStorage,
+  MockAsyncStorage,
+  QuotaExceedingStorage,
+} from "./helpers/MockStorage.js";
 
 describe("StorageAdapter", () => {
   it("read returns null when key does not exist", async () => {
@@ -81,5 +86,46 @@ describe("StorageAdapter", () => {
 
     expect(await adapter1.read()).toBe("data1");
     expect(await adapter2.read()).toBe("data2");
+  });
+
+  it("write throws StorageQuotaError on QuotaExceededError", async () => {
+    const storage = new QuotaExceedingStorage(10);
+    const adapter = new StorageAdapter(storage);
+
+    // Small data succeeds
+    await adapter.write("short");
+    expect(await adapter.read()).toBe("short");
+
+    // Large data throws StorageQuotaError
+    await expect(adapter.write("a".repeat(20))).rejects.toThrow(
+      StorageQuotaError,
+    );
+  });
+
+  it("StorageQuotaError includes original error as cause", async () => {
+    const storage = new QuotaExceedingStorage(10);
+    const adapter = new StorageAdapter(storage);
+
+    try {
+      await adapter.write("a".repeat(20));
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(StorageQuotaError);
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any -- cause exists at runtime (ES2022)
+      expect((error as any).cause).toBeInstanceOf(DOMException);
+    }
+  });
+
+  it("write re-throws non-quota errors unchanged", async () => {
+    const storage = {
+      getItem: (): string | null => null,
+      setItem: (): void => {
+        throw new Error("generic failure");
+      },
+      removeItem: (): void => {},
+    };
+    const adapter = new StorageAdapter(storage);
+
+    await expect(adapter.write("data")).rejects.toThrow("generic failure");
   });
 });
