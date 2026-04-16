@@ -1,0 +1,33 @@
+{
+  "bracketSpacing": true,
+  "printWidth": 80,
+  "semi": true,
+  "singleQuote": false,
+  "tabWidth": 2,
+  "trailingComma": "es5",
+  "experimentalTernaries": true,
+  "plugins": [
+    "./config/prettier/format-jsdoc.js",
+    "./config/prettier/format-mdx3.js"
+  ],
+  "overrides": [
+    {
+      "files": ["*.ts", "*.tsx"],
+      "options": {
+        "parser": "typescript-with-jsdoc"
+      }
+    },
+    {
+      "files": ["**/__tests__/**/*.ts", "**/__tests__/**/*.tsx"],
+      "options": {
+        "parser": "typescript"
+      }
+    },
+    {
+      "files": ["*.mdx"],
+      "options": {
+        "parser": "mdx3"
+      }
+    }
+  ]
+}

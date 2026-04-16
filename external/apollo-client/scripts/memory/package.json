@@ -1,0 +1,11 @@
+{
+  "name": "apollo-client-memory-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --expose-gc --test tests.cts"
+  },
+  "dependencies": {
+    "@apollo/client": "file:../../dist",
+    "graphql": "^16.0.0"
+  }
+}

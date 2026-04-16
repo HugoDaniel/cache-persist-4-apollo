@@ -1,0 +1,100 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`General use should error if the \`variables\` as callback returns false 1`] = `
+[Error: No more mocked responses for the query:
+query GetUser($username: String!) {
+  user(username: $username) {
+    id
+    __typename
+  }
+}
+
+Request variables: {"username":"mock_username"}
+
+Failed to match variables against 1 mock for this query. The available mocks had the following variables:
+  <function variables>
+]
+`;
+
+exports[`General use should error if the query in the mock and component do not match 1`] = `
+[Error: No more mocked responses for the query:
+query GetUser($username: String!) {
+  user(username: $username) {
+    id
+    __typename
+  }
+}
+
+Request variables: {"username":"mock_username"}
+]
+`;
+
+exports[`General use should error if the variables do not deep equal 1`] = `
+[Error: No more mocked responses for the query:
+query GetUser($username: String!) {
+  user(username: $username) {
+    id
+    __typename
+  }
+}
+
+Request variables: {"username":"some_user","age":42}
+
+Failed to match variables against 1 mock for this query. The available mocks had the following variables:
+  {"age":13,"username":"some_user"}
+]
+`;
+
+exports[`General use should error if the variables in the mock and component do not match 1`] = `
+[Error: No more mocked responses for the query:
+query GetUser($username: String!) {
+  user(username: $username) {
+    id
+    __typename
+  }
+}
+
+Request variables: {"username":"other_user"}
+
+Failed to match variables against 1 mock for this query. The available mocks had the following variables:
+  {"username":"mock_username"}
+]
+`;
+
+exports[`General use should return "Mocked response should contain" errors in response 1`] = `
+[Error: Mocked response should contain either \`result\`, \`error\` or a \`delay\` of \`Infinity\`:
+{
+  "request": {
+    "query": "query GetUser($username: String!) {\\n  user(username: $username) {\\n    id\\n  }\\n}",
+    "variables": {
+      "username": "mock_username"
+    }
+  }
+}]
+`;
+
+exports[`General use should return "No more mocked responses" errors in response 1`] = `
+[Error: No more mocked responses for the query:
+query GetUser($username: String!) {
+  user(username: $username) {
+    id
+    __typename
+  }
+}
+
+Request variables: {"username":"mock_username"}
+]
+`;
+
+exports[`General use uses a mock once when \`maxUsageCount\` is not configured 1`] = `
+[Error: No more mocked responses for the query:
+query GetUser($username: String!) {
+  user(username: $username) {
+    id
+    __typename
+  }
+}
+
+Request variables: {"username":"mock_username"}
+]
+`;

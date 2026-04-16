@@ -1,0 +1,45 @@
+import type * as ReactTypes from "react";
+import * as React from "react";
+
+import type { ApolloClient } from "@apollo/client";
+import type {
+  HookWrappers,
+  wrapperSymbol,
+} from "@apollo/client/react/internal";
+import { invariant } from "@apollo/client/utilities/invariant";
+
+export interface ApolloContextValue {
+  client?: ApolloClient;
+  [wrapperSymbol]?: HookWrappers;
+}
+
+// To make sure Apollo Client doesn't create more than one React context
+// (which can lead to problems like having an Apollo Client instance added
+// in one context, then attempting to retrieve it from another different
+// context), a single Apollo context is created and tracked in global state.
+const contextKey = Symbol.for("__APOLLO_CONTEXT__");
+
+export function getApolloContext(): ReactTypes.Context<ApolloContextValue> {
+  invariant(
+    "createContext" in React,
+    "Invoking `getApolloContext` in an environment where `React.createContext` is not available.\n" +
+      "The Apollo Client functionality you are trying to use is only available in React Client Components.\n" +
+      'Please make sure to add "use client" at the top of your file.\n' +
+      // TODO: change to React documentation once React documentation contains information about Client Components
+      "For more information, see https://nextjs.org/docs/getting-started/react-essentials#client-components"
+  );
+
+  let context = (React.createContext as any)[
+    contextKey
+  ] as React.Context<ApolloContextValue>;
+  if (!context) {
+    Object.defineProperty(React.createContext, contextKey, {
+      value: (context = React.createContext<ApolloContextValue>({})),
+      enumerable: false,
+      writable: false,
+      configurable: true,
+    });
+    context.displayName = "ApolloContext";
+  }
+  return context;
+}

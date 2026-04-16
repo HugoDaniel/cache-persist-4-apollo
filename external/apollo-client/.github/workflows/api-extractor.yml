@@ -1,0 +1,24 @@
+name: Api Extractor
+on: pull_request
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  api-extractor:
+    name: Api-Extractor
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ">=23.6.0"
+
+      - name: Install dependencies (with cache)
+        uses: bahmutov/npm-install@v1
+
+        # Builds the library and runs the api extractor
+      - name: Run Api-Extractor
+        run: npm run extract-api

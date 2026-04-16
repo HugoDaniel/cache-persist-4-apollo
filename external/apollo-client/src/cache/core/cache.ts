@@ -1,0 +1,934 @@
+import { WeakCache } from "@wry/caches";
+import { equal } from "@wry/equality";
+import { Trie } from "@wry/trie";
+import type {
+  DocumentNode,
+  FragmentDefinitionNode,
+  InlineFragmentNode,
+} from "graphql";
+import { wrap } from "optimism";
+import {
+  distinctUntilChanged,
+  map,
+  Observable,
+  ReplaySubject,
+  share,
+  shareReplay,
+  tap,
+  timer,
+} from "rxjs";
+
+import type {
+  DataValue,
+  GetDataState,
+  OperationVariables,
+  TypedDocumentNode,
+} from "@apollo/client";
+import type { FragmentType, Unmasked } from "@apollo/client/masking";
+import type { Reference, StoreObject } from "@apollo/client/utilities";
+import { cacheSizes, canonicalStringify } from "@apollo/client/utilities";
+import { __DEV__ } from "@apollo/client/utilities/environment";
+import type {
+  IsAny,
+  NoInfer,
+  Prettify,
+} from "@apollo/client/utilities/internal";
+import {
+  bindCacheKey,
+  combineLatestBatched,
+  equalByQuery,
+  getApolloCacheMemoryInternals,
+  getFragmentDefinition,
+  getFragmentQueryDocument,
+  mapObservableFragmentMemoized,
+} from "@apollo/client/utilities/internal";
+import { invariant } from "@apollo/client/utilities/invariant";
+
+import { defaultCacheSizes } from "../../utilities/caching/sizes.js";
+
+import type { Cache } from "./types/Cache.js";
+import type { MissingTree } from "./types/common.js";
+
+export type Transaction = (c: ApolloCache) => void;
+
+export declare namespace ApolloCache {
+  /**
+   * Acceptable values provided to the `from` option.
+   */
+  export type FromOptionValue<TData> =
+    | StoreObject
+    | Reference
+    | FragmentType<NoInfer<TData>>
+    | string;
+
+  /**
+   * Watched fragment options.
+   */
+  export interface WatchFragmentOptions<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  > {
+    /**
+     * A GraphQL fragment document parsed into an AST with the `gql`
+     * template literal.
+     *
+     * @docGroup 1. Required options
+     */
+    fragment: DocumentNode | TypedDocumentNode<TData, TVariables>;
+    /**
+     * An object containing a `__typename` and primary key fields
+     * (such as `id`) identifying the entity object from which the fragment will
+     * be retrieved, or a `{ __ref: "..." }` reference, or a `string` ID
+     * (uncommon).
+     *
+     * @docGroup 1. Required options
+     */
+    from:
+      | ApolloCache.FromOptionValue<TData>
+      | Array<ApolloCache.FromOptionValue<TData> | null>
+      | null;
+    /**
+     * Any variables that the GraphQL fragment may depend on.
+     *
+     * @docGroup 2. Cache options
+     */
+    variables?: TVariables;
+    /**
+     * The name of the fragment defined in the fragment document.
+     *
+     * Required if the fragment document includes more than one fragment,
+     * optional otherwise.
+     *
+     * @docGroup 2. Cache options
+     */
+    fragmentName?: string;
+    /**
+     * If `true`, `watchFragment` returns optimistic results.
+     *
+     * The default value is `true`.
+     *
+     * @docGroup 2. Cache options
+     */
+    optimistic?: boolean;
+  }
+
+  /**
+   * Watched fragment results.
+   */
+  export type WatchFragmentResult<TData = unknown> =
+    true extends IsAny<TData> ?
+      | ({
+          complete: true;
+          missing?: never;
+        } & GetDataState<any, "complete">)
+      | ({
+          complete: false;
+          missing?: MissingTree;
+        } & GetDataState<any, "partial">)
+    : TData extends null | null[] ?
+      Prettify<
+        {
+          complete: true;
+          missing?: never;
+        } & GetDataState<TData, "complete">
+      >
+    : | Prettify<
+          {
+            complete: true;
+            missing?: never;
+          } & GetDataState<TData, "complete">
+        >
+      | {
+          complete: false;
+          missing?: MissingTree;
+          /** {@inheritDoc @apollo/client!QueryResultDocumentation#data:member} */
+          data: TData extends Array<infer TItem> ?
+            Array<DataValue.Partial<TItem> | null>
+          : DataValue.Partial<TData>;
+          /** {@inheritDoc @apollo/client!QueryResultDocumentation#dataState:member} */
+          dataState: "partial";
+        };
+
+  export interface ObservableFragment<TData = unknown>
+    extends Observable<ApolloCache.WatchFragmentResult<TData>> {
+    /**
+     * Return the current result for the fragment.
+     */
+    getCurrentResult: () => ApolloCache.WatchFragmentResult<TData>;
+  }
+}
+
+export abstract class ApolloCache {
+  public readonly assumeImmutableResults: boolean = false;
+
+  // required to implement
+  // core API
+  public abstract read<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(query: Cache.ReadOptions<TData, TVariables>): Unmasked<TData> | null;
+  public abstract write<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(write: Cache.WriteOptions<TData, TVariables>): Reference | undefined;
+
+  /**
+   * Returns data read from the cache for a given query along with information
+   * about the cache result such as whether the result is complete and details
+   * about missing fields.
+   *
+   * Will return `complete` as `true` if it can fulfill the full cache result or
+   * `false` if not. When no data can be fulfilled from the cache, `null` is
+   * returned. When `returnPartialData` is `true`, non-null partial results are
+   * returned if it contains at least one field that can be fulfilled from the
+   * cache.
+   */
+  public abstract diff<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(query: Cache.DiffOptions<TData, TVariables>): Cache.DiffResult<TData>;
+  public abstract watch<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(watch: Cache.WatchOptions<TData, TVariables>): () => void;
+
+  // Empty the cache and restart all current watches (unless
+  // options.discardWatches is true).
+  public abstract reset(options?: Cache.ResetOptions): Promise<void>;
+
+  // Remove whole objects from the cache by passing just options.id, or
+  // specific fields by passing options.field and/or options.args. If no
+  // options.args are provided, all fields matching options.field (even
+  // those with arguments) will be removed. Returns true iff any data was
+  // removed from the cache.
+  public abstract evict(options: Cache.EvictOptions): boolean;
+
+  // initializer / offline / ssr API
+  /**
+   * Replaces existing state in the cache (if any) with the values expressed by
+   * `serializedState`.
+   *
+   * Called when hydrating a cache (server side rendering, or offline storage),
+   * and also (potentially) during hot reloads.
+   */
+  public abstract restore(serializedState: unknown): this;
+
+  /**
+   * Exposes the cache's complete state, in a serializable format for later restoration.
+   */
+  public abstract extract(optimistic?: boolean): unknown;
+
+  // Optimistic API
+
+  public abstract removeOptimistic(id: string): void;
+
+  // Used by data masking to determine if an inline fragment with a type
+  // condition matches a given typename. Also used by local resolvers to match a
+  // fragment against a typename.
+  //
+  // If not implemented by a cache subclass, data masking will effectively be
+  // disabled since we will not be able to accurately determine if a given type
+  // condition for a union or interface matches a particular type.
+  public abstract fragmentMatches(
+    fragment: InlineFragmentNode | FragmentDefinitionNode,
+    typename: string
+  ): boolean;
+
+  // Function used to lookup a fragment when a fragment definition is not part
+  // of the GraphQL document. This is useful for caches, such as InMemoryCache,
+  // that register fragments ahead of time so they can be referenced by name.
+  public lookupFragment(fragmentName: string): FragmentDefinitionNode | null {
+    return null;
+  }
+
+  // Local state API
+
+  /**
+   * Determines whether a `@client` field can be resolved by the cache. Used
+   * when `LocalState` does not have a local resolver that can resolve the
+   * field.
+   *
+   * @remarks Cache implementations should return `true` if a mechanism in the
+   * cache is expected to provide a value for the field. `LocalState` will set
+   * the value of the field to `undefined` in order for the cache to handle it.
+   *
+   * Cache implementations should return `false` to indicate that it cannot
+   * handle resolving the field (either because it doesn't have a mechanism to
+   * do so, or because the user hasn't provided enough information to resolve
+   * the field). Returning `false` will emit a warning and set the value of the
+   * field to `null`.
+   *
+   * A cache that doesn't implement `resolvesClientField` will be treated the
+   * same as returning `false`.
+   */
+  public resolvesClientField?(typename: string, fieldName: string): boolean;
+
+  // Transactional API
+
+  /**
+   * Executes multiple cache operations as a single batch, ensuring that
+   * watchers are only notified once after all operations complete. This is
+   * useful for improving performance when making multiple cache updates, as it
+   * prevents unnecessary re-renders or query refetches between individual
+   * operations.
+   *
+   * The `batch` method supports both optimistic and non-optimistic updates, and
+   * provides fine-grained control over which cache layer receives the updates
+   * and when watchers are notified.
+   *
+   * For usage instructions, see [Interacting with cached data: `cache.batch`](https://www.apollographql.com/docs/react/caching/cache-interaction#using-cachebatch).
+   *
+   * @example
+   *
+   * ```js
+   * cache.batch({
+   *   update(cache) {
+   *     cache.writeQuery({
+   *       query: GET_TODOS,
+   *       data: { todos: updatedTodos },
+   *     });
+   *     cache.evict({ id: "Todo:123" });
+   *   },
+   * });
+   * ```
+   *
+   * @example
+   *
+   * ```js
+   * // Optimistic update with a custom layer ID
+   * cache.batch({
+   *   optimistic: "add-todo-optimistic",
+   *   update(cache) {
+   *     cache.modify({
+   *       fields: {
+   *         todos(existing = []) {
+   *           return [...existing, newTodoRef];
+   *         },
+   *       },
+   *     });
+   *   },
+   * });
+   * ```
+   *
+   * @returns The return value of the `update` function.
+   */
+  public batch<U>(options: Cache.BatchOptions<this, U>): U {
+    const optimisticId =
+      typeof options.optimistic === "string" ? options.optimistic
+      : options.optimistic === false ? null
+      : void 0;
+    let updateResult: U;
+    this.performTransaction(
+      () => (updateResult = options.update(this)),
+      optimisticId
+    );
+    return updateResult!;
+  }
+
+  public abstract performTransaction(
+    transaction: Transaction,
+    // Although subclasses may implement recordOptimisticTransaction
+    // however they choose, the default implementation simply calls
+    // performTransaction with a string as the second argument, allowing
+    // performTransaction to handle both optimistic and non-optimistic
+    // (broadcast-batching) transactions. Passing null for optimisticId is
+    // also allowed, and indicates that performTransaction should apply
+    // the transaction non-optimistically (ignoring optimistic data).
+    optimisticId?: string | null
+  ): void;
+
+  public recordOptimisticTransaction(
+    transaction: Transaction,
+    optimisticId: string
+  ) {
+    this.performTransaction(transaction, optimisticId);
+  }
+
+  // Optional API
+
+  // Called once per input document, allowing the cache to make static changes
+  // to the query, such as adding __typename fields.
+  public transformDocument(document: DocumentNode): DocumentNode {
+    return document;
+  }
+
+  // Called before each ApolloLink request, allowing the cache to make dynamic
+  // changes to the query, such as filling in missing fragment definitions.
+  public transformForLink(document: DocumentNode): DocumentNode {
+    return document;
+  }
+
+  public identify(object: StoreObject | Reference): string | undefined {
+    return;
+  }
+
+  public gc(): string[] {
+    return [];
+  }
+
+  public modify<Entity extends Record<string, any> = Record<string, any>>(
+    options: Cache.ModifyOptions<Entity>
+  ): boolean {
+    return false;
+  }
+
+  /**
+   * Read data from the cache for the specified query.
+   */
+  public readQuery<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >({
+    // spread in type definitions for discoverability in the docs
+    query,
+    variables,
+    id,
+    optimistic,
+    returnPartialData,
+  }: Cache.ReadQueryOptions<TData, TVariables>): Unmasked<TData> | null;
+  /**
+   * {@inheritDoc @apollo/client!ApolloCache#readQuery:member(1)}
+   */
+  public readQuery<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(
+    options: Cache.ReadQueryOptions<TData, TVariables>,
+    /**
+     * @deprecated Pass the `optimistic` argument as part of the first argument
+     * instead of passing it as a separate option.
+     */
+    optimistic: boolean
+  ): Unmasked<TData> | null;
+  public readQuery<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(
+    options: Cache.ReadQueryOptions<TData, TVariables>,
+    optimistic = !!options.optimistic
+  ): Unmasked<TData> | null {
+    return this.read({
+      ...options,
+      rootId: options.id || "ROOT_QUERY",
+      optimistic,
+    });
+  }
+
+  private fragmentWatches = new Trie<{
+    observable?: ApolloCache.ObservableFragment<any> & { dirty: boolean };
+  }>(true);
+
+  public watchFragment<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(
+    options: ApolloCache.WatchFragmentOptions<TData, TVariables> & {
+      from: Array<ApolloCache.FromOptionValue<TData>>;
+    }
+  ): ApolloCache.ObservableFragment<Array<Unmasked<TData>>>;
+
+  public watchFragment<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(
+    options: ApolloCache.WatchFragmentOptions<TData, TVariables> & {
+      from: Array<null>;
+    }
+  ): ApolloCache.ObservableFragment<Array<null>>;
+
+  public watchFragment<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(
+    options: ApolloCache.WatchFragmentOptions<TData, TVariables> & {
+      from: Array<ApolloCache.FromOptionValue<TData> | null>;
+    }
+  ): ApolloCache.ObservableFragment<Array<Unmasked<TData> | null>>;
+
+  public watchFragment<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(
+    options: ApolloCache.WatchFragmentOptions<TData, TVariables> & {
+      from: null;
+    }
+  ): ApolloCache.ObservableFragment<null>;
+
+  public watchFragment<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(
+    options: ApolloCache.WatchFragmentOptions<TData, TVariables> & {
+      from: ApolloCache.FromOptionValue<TData>;
+    }
+  ): ApolloCache.ObservableFragment<Unmasked<TData>>;
+
+  public watchFragment<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(
+    options: ApolloCache.WatchFragmentOptions<TData, TVariables>
+  ): ApolloCache.ObservableFragment<Unmasked<TData> | null>;
+
+  /** {@inheritDoc @apollo/client!ApolloClient#watchFragment:member(1)} */
+  public watchFragment<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(
+    options: ApolloCache.WatchFragmentOptions<TData, TVariables>
+  ):
+    | ApolloCache.ObservableFragment<Unmasked<TData> | null>
+    | ApolloCache.ObservableFragment<Array<Unmasked<TData> | null>> {
+    const { fragment, fragmentName, from } = options;
+    const query = this.getFragmentDoc(
+      fragment,
+      fragmentName
+    ) as TypedDocumentNode<TData, TVariables>;
+
+    const fromArray = Array.isArray(from) ? from : [from];
+
+    const ids = fromArray.map((value) => {
+      // While our TypeScript types do not allow for `undefined` as a valid
+      // `from`, its possible `useFragment` gives us an `undefined` since it
+      // calls` cache.identify` and provides that value to `from`. We are
+      // adding this fix here however to ensure those using plain JavaScript
+      // and using `cache.identify` themselves will avoid seeing the obscure
+      // warning.
+      const id = value == null ? value : this.toCacheId(value);
+
+      if (__DEV__) {
+        const actualFragmentName =
+          fragmentName || getFragmentDefinition(fragment).name.value;
+
+        if (id === undefined) {
+          invariant.warn(
+            "Could not identify object passed to `from` for '%s' fragment, either because the object is non-normalized or the key fields are missing. If you are masking this object, please ensure the key fields are requested by the parent object.",
+            actualFragmentName
+          );
+        }
+      }
+
+      return id as string | null;
+    });
+
+    if (!Array.isArray(from)) {
+      const observable = this.watchSingleFragment(ids[0], query, options);
+      // Unfortunately we forgot to allow for `null` on watchFragment in 4.0
+      // when `from` is a single record. As such, we need to fallback to {}
+      // when diff.result is null to maintain backwards compatibility. We
+      // should plan to change this in v5. We do however support `null` if
+      // `from` is explicitly `null`.
+      //
+      // NOTE: Using `from` with an array will maintain `null` properly
+      // without the need for a similar fallback since watchFragment with
+      // arrays is new functionality in v4.1.
+      return from === null ? observable : (
+          mapObservableFragmentMemoized(
+            observable,
+            Symbol.for("apollo.transform.individualResult"),
+            (result: ApolloCache.WatchFragmentResult<any>) => ({
+              ...result,
+              data: result.data ?? ({} as any),
+            })
+          )
+        );
+    }
+
+    let currentResult: ApolloCache.WatchFragmentResult<TData>;
+    function toResult(
+      results: Array<ApolloCache.WatchFragmentResult<TData>>
+    ): ApolloCache.WatchFragmentResult<any> {
+      const result = results.reduce(
+        (memo, result, idx) => {
+          memo.data.push(result.data);
+          memo.complete &&= result.complete;
+          memo.dataState = memo.complete ? "complete" : "partial";
+
+          if (result.missing) {
+            memo.missing ||= {};
+            (memo.missing as any)[idx] = result.missing;
+          }
+
+          return memo;
+        },
+        {
+          data: [],
+          dataState: "complete",
+          complete: true,
+        } as ApolloCache.WatchFragmentResult<TData>
+      );
+
+      if (!equal(currentResult, result)) {
+        currentResult = result;
+      }
+
+      return currentResult;
+    }
+
+    if (ids.length === 0) {
+      return emptyArrayObservable;
+    }
+
+    let subscribed = false;
+    const observables = ids.map((id) =>
+      this.watchSingleFragment(id, query, options)
+    ) as Array<ApolloCache.ObservableFragment<TData>>;
+
+    const observable = combineLatestBatched(observables).pipe(
+      map(toResult),
+      tap({
+        subscribe: () => (subscribed = true),
+        unsubscribe: () => (subscribed = false),
+      }),
+      shareReplay({ bufferSize: 1, refCount: true })
+    );
+
+    return Object.assign(observable, {
+      getCurrentResult: () => {
+        if (subscribed && currentResult) {
+          return currentResult as any;
+        }
+
+        const results = observables.map((observable) =>
+          observable.getCurrentResult()
+        );
+
+        return toResult(results);
+      },
+    } satisfies Pick<
+      | ApolloCache.ObservableFragment<Unmasked<TData> | null>
+      | ApolloCache.ObservableFragment<Array<Unmasked<TData> | null>>,
+      "getCurrentResult"
+    >) as any;
+  }
+
+  /**
+   * Can be overridden by subclasses to delay calling the provided callback
+   * until after all broadcasts have been completed - e.g. in a cache scenario
+   * where many watchers are notified in parallel.
+   */
+  protected onAfterBroadcast = (cb: () => void) => cb();
+  private watchSingleFragment<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(
+    id: string | null,
+    fragmentQuery: TypedDocumentNode<TData, TVariables>,
+    options: Omit<
+      ApolloCache.WatchFragmentOptions<TData, TVariables>,
+      "from" | "fragment" | "fragmentName"
+    >
+  ): ApolloCache.ObservableFragment<Unmasked<TData> | null> & {
+    dirty: boolean;
+  } {
+    if (id === null) {
+      return nullObservable as any;
+    }
+
+    const { optimistic = true, variables } = options;
+
+    const cacheKey = [
+      fragmentQuery,
+      canonicalStringify({ id, optimistic, variables }),
+    ];
+    const cacheEntry = this.fragmentWatches.lookupArray(cacheKey);
+
+    if (!cacheEntry.observable) {
+      let subscribed = false;
+      let currentResult: ApolloCache.WatchFragmentResult<TData>;
+
+      function getNewestResult(diff: Cache.DiffResult<TData>) {
+        const data = diff.result;
+
+        if (
+          !currentResult ||
+          !equalByQuery(
+            fragmentQuery,
+            { data: currentResult.data },
+            { data },
+            options.variables
+          )
+        ) {
+          currentResult = {
+            data,
+            dataState: diff.complete ? "complete" : "partial",
+            complete: diff.complete,
+          } as ApolloCache.WatchFragmentResult<TData>;
+
+          if (diff.missing) {
+            currentResult.missing = diff.missing.missing;
+          }
+        }
+
+        return currentResult;
+      }
+
+      const observable: Observable<ApolloCache.WatchFragmentResult<TData>> & {
+        dirty?: boolean;
+      } = new Observable<ApolloCache.WatchFragmentResult<TData>>((observer) => {
+        subscribed = true;
+        const cleanup = this.watch<TData, TVariables>({
+          variables,
+          returnPartialData: true,
+          id,
+          query: fragmentQuery,
+          optimistic,
+          immediate: true,
+          callback: (diff) => {
+            observable.dirty = true;
+            this.onAfterBroadcast(() => {
+              observer.next(getNewestResult(diff));
+              observable.dirty = false;
+            });
+          },
+        });
+        return () => {
+          subscribed = false;
+          cleanup();
+          this.fragmentWatches.removeArray(cacheKey);
+        };
+      }).pipe(
+        distinctUntilChanged(),
+        share({
+          connector: () => new ReplaySubject(1),
+          // debounce so a synchronous unsubscribe+resubscribe doesn't tear down the watch and create a new one
+          resetOnRefCountZero: () => timer(0),
+        })
+      );
+
+      cacheEntry.observable = Object.assign(observable, {
+        dirty: false,
+        getCurrentResult: () => {
+          if (subscribed && currentResult) {
+            return currentResult;
+          }
+
+          return getNewestResult(
+            this.diff<TData>({
+              id,
+              query: fragmentQuery,
+              returnPartialData: true,
+              optimistic,
+              variables,
+            })
+          );
+        },
+      });
+    }
+
+    return cacheEntry.observable as ApolloCache.ObservableFragment<Unmasked<TData> | null> & {
+      dirty: boolean;
+    };
+  }
+
+  // Make sure we compute the same (===) fragment query document every
+  // time we receive the same fragment in readFragment.
+  private getFragmentDoc = wrap(getFragmentQueryDocument, {
+    max:
+      cacheSizes["cache.fragmentQueryDocuments"] ||
+      defaultCacheSizes["cache.fragmentQueryDocuments"],
+    cache: WeakCache,
+    makeCacheKey: bindCacheKey(this),
+  });
+
+  /**
+   * Read data from the cache for the specified fragment.
+   */
+  public readFragment<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >({
+    // spread in type definitions for discoverability in the docs
+    fragment,
+    variables,
+    fragmentName,
+    id,
+    from,
+    optimistic,
+    returnPartialData,
+  }: Cache.ReadFragmentOptions<TData, TVariables>): Unmasked<TData> | null;
+
+  public readFragment<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(
+    options: Cache.ReadFragmentOptions<TData, TVariables>,
+    /**
+     * @deprecated Pass the `optimistic` argument as part of the first argument
+     * instead of passing it as a separate option.
+     */
+    optimistic: boolean
+  ): Unmasked<TData> | null;
+
+  public readFragment<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(
+    options: Cache.ReadFragmentOptions<TData, TVariables>,
+    optimistic = !!options.optimistic
+  ): Unmasked<TData> | null {
+    const id =
+      options.from !== undefined ? this.toCacheId(options.from) : options.id;
+
+    return this.read({
+      ...options,
+      query: this.getFragmentDoc(options.fragment, options.fragmentName),
+      rootId: id,
+      optimistic,
+    });
+  }
+
+  /**
+   * Writes data to the root of the cache using the specified query to validate that
+   * the shape of the data you’re writing to the cache is the same as the shape of
+   * the data required by the query. Great for prepping the cache with initial data.
+   */
+  public writeQuery<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >({
+    // spread in type definitions for discoverability in the docs
+    data,
+    query,
+    variables,
+    overwrite,
+    id,
+    broadcast,
+  }: Cache.WriteQueryOptions<TData, TVariables>): Reference | undefined;
+  public writeQuery<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >({
+    id,
+    data,
+    ...options
+  }: Cache.WriteQueryOptions<TData, TVariables>): Reference | undefined {
+    return this.write(
+      Object.assign(options, {
+        dataId: id || "ROOT_QUERY",
+        result: data,
+      })
+    );
+  }
+
+  /**
+   * Similar to `writeQuery` (writes data to the cache) but uses the specified
+   * fragment to validate that the shape of the data you’re writing to the cache
+   * is the same as the shape of the data required by the fragment.
+   */
+  public writeFragment<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >({
+    // spread in type definitions for discoverability in the docs
+    data,
+    fragment,
+    fragmentName,
+    variables,
+    overwrite,
+    id,
+    from,
+    broadcast,
+  }: Cache.WriteFragmentOptions<TData, TVariables>): Reference | undefined;
+
+  public writeFragment<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >({
+    data,
+    fragment,
+    fragmentName,
+    ...options
+  }: Cache.WriteFragmentOptions<TData, TVariables>): Reference | undefined {
+    const id =
+      options.from !== undefined ? this.toCacheId(options.from) : options.id;
+
+    return this.write(
+      Object.assign(options, {
+        query: this.getFragmentDoc(fragment, fragmentName),
+        dataId: id,
+        result: data,
+      })
+    );
+  }
+
+  public updateQuery<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(
+    options: Cache.UpdateQueryOptions<TData, TVariables>,
+    update: (data: Unmasked<TData> | null) => Unmasked<TData> | null | void
+  ): Unmasked<TData> | null {
+    return this.batch({
+      update(cache) {
+        const value = cache.readQuery<TData, TVariables>(options);
+        const data = update(value);
+        if (data === void 0 || data === null) return value;
+        cache.writeQuery<TData, TVariables>({ ...options, data });
+        return data;
+      },
+    });
+  }
+
+  public updateFragment<
+    TData = unknown,
+    TVariables extends OperationVariables = OperationVariables,
+  >(
+    options: Cache.UpdateFragmentOptions<TData, TVariables>,
+    update: (data: Unmasked<TData> | null) => Unmasked<TData> | null | void
+  ): Unmasked<TData> | null {
+    return this.batch({
+      update(cache) {
+        const value = cache.readFragment<TData, TVariables>(options);
+        const data = update(value);
+        if (data === void 0 || data === null) return value;
+        cache.writeFragment<TData, TVariables>({ ...options, data });
+        return data;
+      },
+    });
+  }
+
+  private toCacheId(from: ApolloCache.FromOptionValue<any>) {
+    return typeof from === "string" ? from : this.identify(from);
+  }
+
+  /**
+   * @experimental
+   * @internal
+   * This is not a stable API - it is used in development builds to expose
+   * information to the DevTools.
+   * Use at your own risk!
+   */
+  public declare getMemoryInternals?: typeof getApolloCacheMemoryInternals;
+}
+
+if (__DEV__) {
+  ApolloCache.prototype.getMemoryInternals = getApolloCacheMemoryInternals;
+}
+
+const nullResult = Object.freeze({
+  data: null,
+  dataState: "complete",
+  complete: true,
+}) as ApolloCache.WatchFragmentResult<null>;
+
+const nullObservable = Object.assign(
+  new Observable((observer) => {
+    observer.next(nullResult);
+  }),
+  { dirty: false, getCurrentResult: () => nullResult }
+);
+
+const emptyArrayResult = Object.freeze({
+  data: [],
+  dataState: "complete",
+  complete: true,
+});
+
+const emptyArrayObservable: ApolloCache.ObservableFragment<any[]> =
+  Object.assign(
+    new Observable<ApolloCache.WatchFragmentResult<never[]>>((observer) => {
+      observer.next(emptyArrayResult);
+    }),
+    { getCurrentResult: () => emptyArrayResult }
+  );
