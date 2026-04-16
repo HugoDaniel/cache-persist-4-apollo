@@ -1,0 +1,60 @@
+{
+  "name": "cache-persist-4-apollo",
+  "version": "1.0.0",
+  "description": "Cache persistence for Apollo Client compatible with 4+",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --ignore-pattern '**/__tests__/**'",
+    "lint:fix": "eslint src --ignore-pattern '**/__tests__/**' --fix"
+  },
+  "peerDependencies": {
+    "@apollo/client": "^4.0.0",
+    "graphql": "^16.0.0"
+  },
+  "devDependencies": {
+    "@apollo/client": "^4.1.7",
+    "@vitest/coverage-v8": "^3.1.1",
+    "eslint": "^10.2.0",
+    "fast-check": "^4.6.0",
+    "graphql": "^16.10.0",
+    "jsdom": "^29.0.2",
+    "tsup": "^8.4.0",
+    "typescript": "~5.7.3",
+    "typescript-eslint": "^8.58.2",
+    "vitest": "^3.1.1"
+  },
+  "license": "CC0-1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HugoDaniel/cache-persist-4-apollo.git"
+  },
+  "keywords": [
+    "apollo",
+    "apollo-client",
+    "cache",
+    "persist",
+    "persistence",
+    "graphql"
+  ]
+}
