@@ -128,4 +128,26 @@ describe("StorageAdapter", () => {
 
     await expect(adapter.write("data")).rejects.toThrow("generic failure");
   });
+
+  // React Native's Hermes runtime has no global DOMException, so a bare
+  // `instanceof DOMException` throws a ReferenceError that hides the real error.
+  it("write re-throws the storage error when DOMException is not defined", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "DOMException");
+    Reflect.deleteProperty(globalThis, "DOMException");
+    try {
+      expect(typeof DOMException).toBe("undefined");
+      const storage = {
+        getItem: (): string | null => null,
+        setItem: (): void => {
+          throw new Error("disk full");
+        },
+        removeItem: (): void => {},
+      };
+      const adapter = new StorageAdapter(storage);
+
+      await expect(adapter.write("data")).rejects.toThrow("disk full");
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "DOMException", descriptor);
+    }
+  });
 });

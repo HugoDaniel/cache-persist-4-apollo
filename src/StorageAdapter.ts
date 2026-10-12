@@ -28,7 +28,9 @@ export class StorageAdapter {
     try {
       await this.storage.setItem(this.key, data);
     } catch (error) {
+      // React Native's Hermes runtime has no global DOMException.
       if (
+        typeof DOMException !== "undefined" &&
         error instanceof DOMException &&
         error.name === "QuotaExceededError"
       ) {
