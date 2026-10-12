@@ -14,7 +14,8 @@ persistence layer.
 npm install cache-persist-4-apollo
 ```
 
-Peer dependencies: `@apollo/client ^4.0.0` and `graphql ^16.0.0`.
+Peer dependency: `@apollo/client ^4.0.0`. The library never imports `graphql`, so it works
+with whichever `graphql` major your Apollo Client accepts (16 and 17 today).
 
 ## Quick start
 
